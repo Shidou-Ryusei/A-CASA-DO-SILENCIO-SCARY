@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Jogo do Gato</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #dica {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    color: #cfd8d4; font: 16px/1.4 Georgia, serif; letter-spacing: .04em; white-space: nowrap;
+    text-shadow: 0 0 8px #000, 0 0 3px #000; opacity: .9; transition: opacity 1.5s; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="jogo"></canvas>
+<div id="dica">W A S D andar &nbsp;·&nbsp; SHIFT ou ESPAÇO pular &nbsp;·&nbsp; pise na cabeça dos fantasmas &nbsp;·&nbsp; encontre as 2 chaves e escape da mansão &nbsp;·&nbsp; M som</div>
+
+<script>
+/* ============ CONFIGURAÇÃO ============
+   Cenas: 1 jardim · 2 salão · 3 sala1 (espinhos, porta AZUL) · 4 sala2 (corredor roxo, CHAVE 1) · 5 sala3 (quarto, CHAVE 2) */
+const ARQ = { c1: "cenario.png", c2: "cenario2_original_size.png", s1: "sala1.png", s2: "sala2.png", s3: "sala3.png",
+              k1: "chave_ouro.png", k2: "chave_prata.png", fim: "final.png" };
+const GATO_TAM = 210, GATO_OLHA_PARA = "direita";
+const FANT_TAM = 120, FANT_OLHA_PARA = "direita";
+const ZOOM = 1.5;
+const ACEL = 2600, ATRITO = 9, VEL_MAX = 420;
+const PULO_V = 640, GRAV = 1900;
+const PES = GATO_TAM * 0.45;
+const MA = 1600;
+const PORTA = { x: 1443, y: 1235 };           // porta da frente (jardim)
+const SAIDA = { x: 1424, y: 1550 };           // porta de saída do salão (trancada até pegar as 2 chaves)
+const PORTA_S1 = [520, 680], PORTA_S2 = [1990, 2130], PORTA_Y = 1270;   // portas do salão: azul (esq.) e roxa (dir.)
+const FPOLY = [[0.446, 0.588], [0.559, 0.588], [0.959, 0.994], [0.108, 0.994]];   // chão das salas (frações da imagem)
+const SALA_PORTA_X = 0.498, SALA_Y_FUNDO = 0.588, SALA_Y_PERTO = 0.994;
+const ITENS = { 4: [{ id: 1, fx: 0.75, fy: 0.87 }], 5: [{ id: 2, fx: 0.22, fy: 0.90 }] };   // posição das chaves (frações)
+const COR_PORTA = { 3: "80,170,255", 4: "190,90,255", 5: "255,180,90" };
+
+/* ============ ÁREAS ANDÁVEIS ============ */
+const ZONAS = {
+  1: { ok: [[70, 1380, 2780, 1590], [1300, 1195, 1590, 1400]], bloq: [[0, 0, 250, 1500], [90, 1420, 340, 1590]] },
+  2: { ok: [[80, 1300, 2760, 1565], [520, 1240, 680, 1320], [1966, 1240, 2200, 1320]],
+       bloq: [[0, 1180, 520, 1600], [2360, 1180, 2848, 1600], [870, 1200, 1965, 1480], [2230, 1330, 2370, 1420]] }
+};
+const dentro = (r, x, y) => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
+function dentroPoly(x, y, p) {
+  let d = false;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++)
+    if ((p[i][1] > y) !== (p[j][1] > y) && x < (p[j][0] - p[i][0]) * (y - p[i][1]) / (p[j][1] - p[i][1]) + p[i][0]) d = !d;
+  return d;
+}
+function livre(x, y) {
+  if (cena >= 3) return dentroPoly(x, y, FPOLY.map(([a, b]) => [a * ML, b * MA]));
+  const z = ZONAS[cena]; return z.ok.some(r => dentro(r, x, y)) && !z.bloq.some(r => dentro(r, x, y));
+}
+const Sf = (y) => cena >= 3 ? 0.2 + 0.8 * lim((y - SALA_Y_FUNDO * MA) / ((SALA_Y_PERTO - SALA_Y_FUNDO) * MA), 0, 1) : 1;
+function bordas(y) {
+  const u = lim((y - SALA_Y_FUNDO * MA) / ((SALA_Y_PERTO - SALA_Y_FUNDO) * MA), 0, 1);
+  return [ML * (FPOLY[0][0] + (FPOLY[3][0] - FPOLY[0][0]) * u), ML * (FPOLY[1][0] + (FPOLY[2][0] - FPOLY[1][0]) * u)];
+}
+
+/* ============ SETUP ============ */
+const canvas = document.getElementById("jogo");
+const ctx = canvas.getContext("2d");
+let W, H, DPR, escala, ML = 2848, cena = 1;
+function calcEscala() { escala = Math.max(W / ML, H / MA) * ZOOM; }
+function redimensionar() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR; calcEscala();
+}
+window.addEventListener("resize", redimensionar);
+redimensionar();
+
+const carregar = (s) => { const i = new Image(); i.src = s; return i; };
+const cenario = carregar(ARQ.c1), cenario2 = carregar(ARQ.c2);
+const salaImg = { 3: carregar(ARQ.s1), 4: carregar(ARQ.s2), 5: carregar(ARQ.s3) };
+const chaveImg = { 1: carregar(ARQ.k1), 2: carregar(ARQ.k2) }, finalImg = carregar(ARQ.fim);
+const gatoImg = carregar("cat.png"), fantImg = carregar("fantasma.png");
+const pronto = (i) => i.complete && i.naturalWidth > 0;
+const rand = (a, b) => a + Math.random() * (b - a);
+function lim(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+/* salas de reserva (usadas só se a imagem sala1/sala2/sala3.png não existir) — mesma geometria das imagens */
+function criarSala(p) {
+  const L = 2492, A = MA, c = document.createElement("canvas"); c.width = L; c.height = A;
+  const g = c.getContext("2d"), fl = .43 * L, fr = .575 * L, ft = .30 * A, fb = .575 * A;
+  const P = (pts, col) => { g.fillStyle = col; g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fill(); };
+  g.fillStyle = "#07060c"; g.fillRect(0, 0, L, A);
+  P([[0, 0], [L, 0], [fr, ft], [fl, ft]], p.t);
+  P([[0, 0], [fl, ft], [fl, fb], [-200, 1680], [-200, 0]], p.a);
+  P([[L, 0], [fr, ft], [fr, fb], [L + 200, 1680], [L + 200, 0]], p.b);
+  P([[fl, ft], [fr, ft], [fr, fb], [fl, fb]], p.c);
+  const gr = g.createLinearGradient(0, fb, 0, A); gr.addColorStop(0, p.f1); gr.addColorStop(1, p.f2);
+  P([[fl, fb], [fr, fb], [L + 200, 1680], [-200, 1680]], gr);
+  g.strokeStyle = "rgba(0,0,0,.6)"; g.lineWidth = 3;
+  for (let i = 0; i <= 24; i++) { g.beginPath(); g.moveTo(fl + i / 24 * (fr - fl), fb); g.lineTo(-200 + i / 24 * (L + 400), 1680); g.stroke(); }
+  for (let k = 1; k < 15; k++) { const y = fb + (A + 80 - fb) * (k / 14) ** 2, u = (y - fb) / (1680 - fb);
+    g.beginPath(); g.moveTo(fl - (fl + 200) * u, y); g.lineTo(fr + (L + 200 - fr) * u, y); g.stroke(); }
+  g.fillStyle = p.m; [[.4, .8, 150], [.62, .9, 190], [.5, .7, 90]].forEach(([x, y, r]) => { g.beginPath(); g.ellipse(x * L, y * A, r, r * .3, 0, 0, 7); g.fill(); });
+  if (p.tapete) { g.fillStyle = "#4a1822"; g.beginPath(); g.ellipse(L * .5, A * .84, 520, 120, 0, 0, 7); g.fill(); g.strokeStyle = "#8a6a2a"; g.lineWidth = 6; g.stroke(); }
+  const dw = .045 * L, dh = .17 * A, dx = SALA_PORTA_X * L, rg = g.createRadialGradient(dx, fb - dh / 2, 0, dx, fb - dh / 2, dh * 1.6);
+  rg.addColorStop(0, `rgba(${p.glow},.55)`); rg.addColorStop(1, `rgba(${p.glow},0)`); g.fillStyle = rg; g.fillRect(dx - dh * 1.6, fb - dh * 2.4, dh * 3.2, dh * 3.2);
+  g.fillStyle = p.porta; g.fillRect(dx - dw / 2, fb - dh, dw, dh); g.fillStyle = "#0a0a14"; g.fillRect(dx - dw / 2 + 5, fb - dh + 8, dw - 10, dh - 8);
+  return c;
+}
+const fundos = {
+  3: criarSala({ t: "#0f0c18", a: "#1a1428", b: "#17122a", c: "#120e22", f1: "#2a1b14", f2: "#0c0706", porta: "#6fb8ff", glow: "90,180,255", m: "rgba(90,0,10,.45)" }),
+  4: criarSala({ t: "#100a1c", a: "#1e1432", b: "#1a1030", c: "#150d28", f1: "#2b2236", f2: "#0d0a14", porta: "#c27bff", glow: "190,90,255", m: "rgba(60,20,90,.4)" }),
+  5: criarSala({ t: "#140f0c", a: "#2a1c16", b: "#261a14", c: "#1d1410", f1: "#3a2a1c", f2: "#120c08", porta: "#ffb35a", glow: "255,180,90", m: "rgba(0,0,0,.35)", tapete: true })
+};
+
+/* ============ ESTADO ============ */
+const gato = { x: 1440, y: 1480 - PES, vx: 0, vy: 0, z: 0, vz: 0, dir: 1, andar: 0, mov: 0 };
+const cam = { x: 0, y: 0 };
+let transicao = null, fade = 0, titulo = null, alfaGato = 1, emerge = null, arm = null;
+let vidas = 3, inv = 0, bufPulo = 0, chaves = [false, false], tempoJogo = 0, abates = 0, cdAviso = 0, flashBranco = 0;
+let fim = false, fimTipo = "", fimMsg = "", fimSub = "", visitou = {};
+const nChaves = () => (chaves[0] ? 1 : 0) + (chaves[1] ? 1 : 0);
+
+function alvoCam() {
+  const visL = W / escala, visA = H / escala;
+  return [lim(gato.x - visL / 2, 0, ML - visL), lim(gato.y - visA / 2, 0, MA - visA)];
+}
+function snapCam() { [cam.x, cam.y] = alvoCam(); }
+snapCam();
+
+/* fantasmas: só dentro da mansão (salão, sala2 e quarto) */
+const ini = (y, x0, x1, sp) => ({ x: rand(x0, x1), y, x0, x1, dir: Math.random() < .5 ? -1 : 1, sp: sp || rand(60, 85), vivo: true, morte: 0, f: rand(0, 6) });
+const INIM = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+function criarInimigos() {
+  INIM[1] = []; INIM[3] = [];
+  INIM[2] = [ini(1530, 600, 1500), ini(1400, 560, 850), ini(1470, 2000, 2340)];
+  INIM[4] = [ini(1440, 748, 1794), ini(1552, 548, 2043)];
+  INIM[5] = [ini(1344, 748, 1844), ini(1536, 947, 2093)];
+}
+criarInimigos();
+
+/* ---- entrada ---- */
+const teclas = {};
+addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (k.length === 1 && "wasd".includes(k)) { teclas[k] = true; e.preventDefault(); iniciarSom(); }
+  if ((k === "shift" || e.code === "Space") && !e.repeat) { e.preventDefault(); iniciarSom(); pular(); }
+  if (k === "enter" && fim) reiniciar();
+  if (k === "m") alternarSom();
+});
+addEventListener("keyup", (e) => { teclas[e.key.toLowerCase()] = false; });
+addEventListener("blur", () => { for (const k in teclas) teclas[k] = false; });
+
+function pular() {
+  if (fim || transicao || emerge) return;
+  if (gato.z > 0) { bufPulo = 0.12; return; }
+  gato.vz = PULO_V; sfx("pulo");
+}
+/* morte: volta ao salão com 3 vidas e mantém chaves e fantasmas derrotados · vitória: reinicia tudo */
+function reiniciar() {
+  const total = fimTipo === "vitoria";
+  fim = false; fimTipo = ""; vidas = 3; inv = 2; transicao = null; fade = 0; titulo = null; emerge = null; arm = null;
+  alfaGato = 1; shake = 0; flashRed = 0; flashBranco = 0; Object.assign(gato, { vx: 0, vy: 0, z: 0, vz: 0 });
+  if (total) { chaves = [false, false]; criarInimigos(); tempoJogo = 0; abates = 0; visitou = {}; cena = 1; gato.x = 1440; gato.y = 1480 - PES; }
+  else { cena = 2; gato.x = SAIDA.x; gato.y = 1480 - PES; }
+  ML = 2848; calcEscala(); snapCam();
+}
+function ferir(dx) {
+  vidas--; inv = 1.8; shake = 0.7; flashRed = 1; gato.vx += (dx > 0 ? 1 : -1) * 700; sfx("susto");
+  if (vidas <= 0) morrer("FIM DE JOGO", "Pressione ENTER para voltar ao salão");
+}
+function morrer(msg, sub) { vidas = 0; fim = true; fimTipo = "morte"; fimMsg = msg; fimSub = sub; shake = 1; flashRed = 1; sfx("susto"); sfx("fim"); }
+function escapou() {
+  const m = Math.floor(tempoJogo / 60), s = String(Math.floor(tempoJogo % 60)).padStart(2, "0");
+  fim = true; fimTipo = "vitoria"; fimMsg = "VOCÊ ESCAPOU!";
+  fimSub = `Tempo ${m}:${s}  ·  Fantasmas derrotados ${abates}  ·  Vidas restantes ${vidas}   —   ENTER para jogar de novo`;
+  flashBranco = 1; sfx("destranca");
+}
+function pegarChave(it) {
+  chaves[it.id - 1] = true; sfx("chave"); flashBranco = 0.35;
+  if (it.id === 2) alarme();
+  else dica(nChaves() === 2 ? "Você tem as duas chaves! Corra até a porta de saída do salão" : "Você pegou a chave dourada! (1/2) — falta a outra");
+}
+/* ao pegar a chave do quarto, ele acorda: dois fantasmas rápidos bloqueiam o caminho de volta */
+function alarme() {
+  INIM[5].push(ini(0.70 * MA, 0.36 * ML, 0.66 * ML, 120), ini(0.76 * MA, 0.32 * ML, 0.70 * ML, 105));
+  relamp = 1; relampB = true; shake = 0.8; flashRed = 0.7; falha = 1.2; sfx("alarme");
+  dica(nChaves() === 2 ? "O quarto acordou! Volte pela porta e fuja pela saída!" : "O quarto acordou! Volte pela porta!");
+}
+
+/* ============ ATMOSFERA ============ */
+const nevoa = Array.from({ length: 9 }, () => ({ x: rand(0, 2492), y: rand(0, MA), r: rand(350, 650), vx: rand(8, 24) * (Math.random() < .5 ? -1 : 1) }));
+const poeira = Array.from({ length: 110 }, () => ({ x: rand(0, 2492), y: rand(0, MA), r: rand(1.2, 2.6), vx: rand(-10, 10), vy: rand(-14, -3), f: rand(0, 6) }));
+const nevoaSpr = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 128; const g = c.getContext("2d");
+  const r = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  r.addColorStop(0, "rgba(170,190,185,1)"); r.addColorStop(1, "rgba(170,190,185,0)");
+  g.fillStyle = r; g.fillRect(0, 0, 128, 128); return c;
+})();
+const ROXO = "200,100,255", LARA = "255,150,50";
+const BRILHOS = {
+  2: [[.347, .584, LARA], [.65, .584, LARA], [.151, .514, LARA], [.84, .514, LARA], [.115, .6875, LARA]],
+  3: [[.498, .5, "80,170,255"]],
+  4: [[.113, .51, ROXO], [.263, .5, ROXO], [.342, .49, ROXO], [.384, .485, ROXO], [.855, .51, ROXO], [.629, .48, ROXO], [.59, .49, ROXO]],
+  5: [[.498, .5, "255,180,90"], [.2, .55, LARA], [.8, .55, LARA]]
+};
+const TINTA = { 1: "#7f9a96", 2: "#a898ac", 3: "#8fa4bd", 4: "#b8a6c9", 5: "#b8ae9c" };
+let olhos = null, proxOlhos = rand(4, 8);
+let tempo = 0, lanterna = 1, lanternaAlvo = 1, proxFalha = rand(5, 12), falha = 0;
+let relamp = 0, relampB = false, proxRaio = rand(6, 12);
+let shake = 0, flashRed = 0, fase = 0, dicaT = null;
+
+function dica(txt, ms) {
+  const d = document.getElementById("dica"); d.textContent = txt; d.style.opacity = 0.9;
+  clearTimeout(dicaT); dicaT = setTimeout(() => { d.style.opacity = 0; }, ms || 6500);
+}
+
+/* ============ SOM ============ */
+let audio = null, mudo = false;
+function iniciarSom() {
+  if (audio) return;
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const mestre = ac.createGain(); mestre.gain.value = 0.0; mestre.connect(ac.destination);
+    mestre.gain.linearRampToValueAtTime(0.16, ac.currentTime + 4);
+    [[55, "sine"], [58.3, "sine"], [110.7, "triangle"]].forEach(([f, t], i) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = t; o.frequency.value = f; g.gain.value = i === 2 ? 0.25 : 0.7;
+      const lfo = ac.createOscillator(), lg = ac.createGain();
+      lfo.frequency.value = 0.07 + i * 0.05; lg.gain.value = g.gain.value * 0.5;
+      lfo.connect(lg).connect(g.gain);
+      o.connect(g).connect(mestre); o.start(); lfo.start();
+    });
+    audio = { ac, mestre };
+  } catch (e) {}
+}
+function alternarSom() {
+  if (!audio) return;
+  mudo = !mudo;
+  audio.mestre.gain.setTargetAtTime(mudo ? 0 : 0.16, audio.ac.currentTime, 0.2);
+}
+function tom(tipo, f0, f1, dur, vol, atraso) {
+  const ac = audio.ac, t = ac.currentTime + (atraso || 0), o = ac.createOscillator(), g = ac.createGain();
+  o.type = tipo; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+function ruido(dur, vol, fc) {
+  const ac = audio.ac, n = ac.sampleRate * dur, b = ac.createBuffer(1, n, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = ac.createBufferSource(), fl = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = b; fl.type = "lowpass"; fl.frequency.value = fc; g.gain.value = vol;
+  s.connect(fl).connect(g).connect(ac.destination); s.start();
+}
+function sfx(t) {
+  if (!audio || mudo) return;
+  if (t === "pulo") tom("sine", 300, 640, 0.18, 0.08);
+  else if (t === "pouso") ruido(0.12, 0.12, 400);
+  else if (t === "porta") { tom("sawtooth", 80, 190, 1.3, 0.05); ruido(0.5, 0.08, 900); }
+  else if (t === "trovao") ruido(2.8, 0.4, 170);
+  else if (t === "esmaga") { tom("square", 520, 150, 0.14, 0.07); ruido(0.08, 0.1, 1200); }
+  else if (t === "susto") { tom("sawtooth", 700, 150, 0.5, 0.1); ruido(0.3, 0.14, 2200); }
+  else if (t === "fim") tom("sawtooth", 320, 40, 1.4, 0.12);
+  else if (t === "rumble") ruido(1.4, 0.32, 110);
+  else if (t === "espinhos") { ruido(0.5, 0.25, 3000); tom("sawtooth", 200, 900, 0.25, 0.06); }
+  else if (t === "chave") { tom("triangle", 880, 1760, 0.18, 0.12); tom("sine", 1320, 2640, 0.35, 0.1, 0.12); tom("sine", 1760, 3520, 0.4, 0.08, 0.24); }
+  else if (t === "tranca") { ruido(0.25, 0.4, 300); tom("square", 120, 50, 0.3, 0.1); }
+  else if (t === "trancada") { ruido(0.12, 0.2, 500); tom("square", 160, 110, 0.12, 0.06); }
+  else if (t === "destranca") { ruido(0.2, 0.2, 2500); tom("triangle", 600, 1200, 0.3, 0.1); tom("triangle", 900, 1800, 0.5, 0.1, 0.25); }
+  else if (t === "alarme") { tom("sawtooth", 400, 900, 0.4, 0.1); tom("sawtooth", 900, 300, 0.6, 0.1, 0.4); ruido(0.6, 0.2, 1800); }
+}
+
+/* ============ TRANSIÇÃO DE CENA ============ */
+function trocar(para, final) { if (transicao) return; transicao = { para, final, t: 0, feito: false }; sfx(final ? "destranca" : "porta"); }
+function aplicarTroca(para, final) {
+  const de = cena;
+  cena = para; ML = para >= 3 ? 2492 : 2848; calcEscala();
+  gato.vx = gato.vy = 0; gato.z = gato.vz = 0; olhos = null; emerge = null; arm = null; titulo = null;
+  if (para === 1) { gato.x = PORTA.x; gato.y = 1300 - PES; if (final) escapou(); }
+  else if (para === 2) {
+    if (de === 1) {
+      gato.x = SAIDA.x; gato.y = 1520 - PES; titulo = { txt: "DENTRO DA MANSÃO", t: 0 };
+      setTimeout(() => { if (cena === 2) { sfx("tranca"); shake = 0.8; dica("A porta se trancou atrás de você... encontre as 2 chaves e escape!", 8000); } }, 1500);
+    } else { gato.x = de === 3 ? 600 : 2040; gato.y = 1330 - PES; }
+  } else if (de === 5 && para === 4) { gato.x = 0.5 * ML; gato.y = 0.95 * MA - PES; inv = 2; }   // volta do quarto: chega pela beira de baixo
+  else {
+    gato.x = SALA_PORTA_X * ML; gato.y = (SALA_Y_FUNDO + 0.004) * MA - PES; gato.dir = 1;
+    emerge = { t: 0, dur: 1.7 }; inv = 2.4; sfx("porta");
+    if (para >= 4 && !visitou[para]) { visitou[para] = 1; titulo = { txt: para === 4 ? "O CORREDOR ROXO" : "O QUARTO", t: 0 }; }
+  }
+  snapCam();
+}
+
+/* ============ ATUALIZAÇÃO ============ */
+function atualizar(dt) {
+  tempo += dt; cdAviso -= dt;
+  if (!fim && !transicao) tempoJogo += dt;
+  const travado = transicao || fim || emerge;
+  let ix = travado ? 0 : (teclas.d ? 1 : 0) - (teclas.a ? 1 : 0);
+  let iy = travado ? 0 : (teclas.s ? 1 : 0) - (teclas.w ? 1 : 0);
+  if (ix && iy) { ix *= Math.SQRT1_2; iy *= Math.SQRT1_2; }
+
+  gato.vx += ix * ACEL * dt; gato.vy += iy * ACEL * dt;
+  const f = Math.exp(-ATRITO * dt);
+  gato.vx *= f; gato.vy *= f;
+  const v = Math.hypot(gato.vx, gato.vy);
+  if (v > VEL_MAX) { gato.vx *= VEL_MAX / v; gato.vy *= VEL_MAX / v; }
+
+  const sp = cena >= 3 ? 0.45 + 0.55 * Sf(gato.y + PES) : 1;
+  const nx = gato.x + gato.vx * dt * sp; if (livre(nx, gato.y + PES)) gato.x = nx; else gato.vx = 0;
+  const ny = gato.y + gato.vy * dt * sp; if (livre(gato.x, ny + PES)) gato.y = ny; else gato.vy = 0;
+
+  if (gato.z > 0 || gato.vz > 0) {
+    gato.vz -= GRAV * dt; gato.z += gato.vz * dt;
+    if (gato.z <= 0) {
+      if (gato.vz < -300) sfx("pouso");
+      gato.z = 0; gato.vz = 0;
+      if (bufPulo > 0) { gato.vz = PULO_V; sfx("pulo"); }
+    }
+  }
+  bufPulo = Math.max(0, bufPulo - dt); inv = Math.max(0, inv - dt);
+
+  // surgir da porta / entrar na porta (caminhada automática com fade)
+  alfaGato = 1;
+  if (emerge) {
+    emerge.t += dt;
+    const u = Math.min(1, emerge.t / emerge.dur), e = 1 - (1 - u) * (1 - u);
+    gato.x = SALA_PORTA_X * ML; gato.y = (SALA_Y_FUNDO + 0.004 + (0.80 - SALA_Y_FUNDO - 0.004) * e) * MA - PES;
+    gato.vx = gato.vy = 0; gato.dir = 1; alfaGato = Math.min(1, emerge.t / 0.35);
+    if (u >= 1) { emerge = null; if (cena === 3) arm = { t: 0 }; }
+  } else if (transicao && !transicao.feito) {
+    const p = transicao.para; let d = 0;
+    if (cena === 2 && p >= 3) d = -1;
+    else if (cena >= 3 && (p === 2 || (cena === 5 && p === 4))) d = -1;
+    else if (cena === 4 && p === 5) d = 1;
+    if (d) { gato.y += d * 70 * dt; alfaGato = Math.max(0, 1 - transicao.t / 0.8); }
+  }
+
+  if (Math.abs(gato.vx) > 20) gato.dir = Math.sign(gato.vx);
+  gato.mov = emerge || (transicao && !transicao.feito && alfaGato < 1) ? 0.75 : Math.min(1, v / VEL_MAX);
+  gato.andar += dt * (4 + gato.mov * 10) * (gato.mov > 0.03 ? 1 : 0.3);
+
+  const py = gato.y + PES;
+
+  // portas e saídas
+  if (!transicao && !fim && !emerge) {
+    if (cena === 1 && py < PORTA.y && Math.abs(gato.x - PORTA.x) < 130) trocar(2);
+    else if (cena === 2) {
+      if (py > SAIDA.y && Math.abs(gato.x - SAIDA.x) < 260) {
+        if (nChaves() === 2) trocar(1, true);                                   // as duas chaves: destranca e escapa
+        else if (cdAviso <= 0) { cdAviso = 2; sfx("trancada"); gato.vy = -520; dica(`A porta de saída está trancada — faltam ${2 - nChaves()} chave(s)`); }
+      }
+      else if (py < PORTA_Y && gato.x > PORTA_S1[0] && gato.x < PORTA_S1[1]) trocar(3);   // porta azul
+      else if (py < PORTA_Y && gato.x > PORTA_S2[0] && gato.x < PORTA_S2[1]) trocar(4);   // porta roxa
+    } else if (cena >= 3) {
+      if (py < 0.62 * MA && Math.abs(gato.x - SALA_PORTA_X * ML) < 0.045 * ML) trocar(cena === 5 ? 4 : 2);
+      else if (cena === 4 && py > 0.985 * MA) trocar(5);                         // sala2 -> quarto
+    }
+    // chaves
+    (ITENS[cena] || []).forEach(it => {
+      if (chaves[it.id - 1]) return;
+      const S = Sf(py);
+      if (Math.abs(gato.x - it.fx * ML) < 80 * S + 20 && Math.abs(py - it.fy * MA) < 60 * S + 15 && gato.z < 130) pegarChave(it);
+    });
+  }
+  if (transicao) {
+    const t = (transicao.t += dt);
+    fade = t < 0.8 ? t / 0.8 : Math.max(0, 1 - (t - 0.8) / 0.8);
+    if (t >= 0.8 && !transicao.feito) { transicao.feito = true; aplicarTroca(transicao.para, transicao.final); }
+    if (t >= 1.6) { transicao = null; fade = 0; }
+  }
+
+  // armadilha da sala1: treme 1.4 s (dá para fugir pela porta), depois espinhos sobem em onda e matam
+  if (arm && !fim) {
+    arm.t += dt; const et = arm.t - 1.4;
+    if (!arm.r) { arm.r = 1; sfx("rumble"); }
+    if (et < 0) shake = Math.max(shake, 0.1 + 0.25 * arm.t / 1.4);
+    else {
+      if (!arm.e) { arm.e = 1; sfx("espinhos"); shake = Math.max(shake, 0.6); }
+      const frente = SALA_Y_FUNDO * MA + (SALA_Y_PERTO - SALA_Y_FUNDO) * MA * lim(et / 1.2, 0, 1);
+      if (py <= frente + 10 && gato.z < 70) morrer("EMPALADO!", "Os espinhos não perdoam · ENTER para voltar ao salão");
+    }
+  }
+
+  // inimigos
+  INIM[cena].forEach(e => {
+    if (!e.vivo) { e.morte += dt; return; }
+    e.x += e.dir * e.sp * dt * Sf(e.y);
+    if (e.x < e.x0) { e.x = e.x0; e.dir = 1; } if (e.x > e.x1) { e.x = e.x1; e.dir = -1; }
+    if (travado) return;
+    const S = Sf(py), dx = gato.x - e.x, dy = py - e.y;
+    if (Math.abs(dx) < 70 * S && Math.abs(dy) < 45 * S) {
+      if (gato.vz < 0 && gato.z > 40) { e.vivo = false; e.morte = 0; gato.vz = 560; abates++; sfx("esmaga"); }
+      else if (gato.z < 100 && inv <= 0) ferir(dx);
+    }
+  });
+
+  const [ax, ay] = alvoCam(), c = 1 - Math.exp(-4 * dt);
+  cam.x += (ax - cam.x) * c; cam.y += (ay - cam.y) * c;
+
+  proxFalha -= dt;
+  if (proxFalha <= 0) { falha = rand(0.25, 0.7); proxFalha = rand(5, 12); }
+  if (falha > 0) { falha -= dt; lanternaAlvo = Math.random() < .5 ? 0.25 : 0.9; }
+  else lanternaAlvo = 1 + Math.sin(tempo * 9) * 0.015 + Math.sin(tempo * 23) * 0.01;
+  lanterna += (lanternaAlvo - lanterna) * (1 - Math.exp(-30 * dt));
+
+  proxRaio -= dt;
+  if (proxRaio <= 0 && !transicao) { relamp = 1; relampB = true; proxRaio = rand(8, 18); setTimeout(() => sfx("trovao"), rand(400, 1400)); }
+  if (relamp > 0) { relamp -= dt * 3; if (relamp < 0.45 && relampB) { relamp = 0.85; relampB = false; } }
+  relamp = Math.max(0, relamp);
+
+  shake = Math.max(0, shake - dt * 1.4); flashRed = Math.max(0, flashRed - dt * 1.8); flashBranco = Math.max(0, flashBranco - dt * 0.9);
+  fase += dt * (2.2 + (vidas === 1 ? 2 : vidas === 2 ? 0.6 : 0));
+
+  nevoa.forEach(n => { n.x += n.vx * dt; if (n.x > ML + n.r) n.x = -n.r; if (n.x < -n.r) n.x = ML + n.r; });
+  poeira.forEach(p => {
+    p.x += (p.vx + Math.sin(tempo + p.f) * 8) * dt; p.y += p.vy * dt;
+    if (p.y < 0) p.y = MA; if (p.x < 0) p.x = ML; if (p.x > ML) p.x = 0;
+  });
+
+  proxOlhos -= dt;
+  if (cena === 1 && !olhos && proxOlhos <= 0) {
+    const ang = rand(0, Math.PI * 2), d = rand(520, 900);
+    olhos = { x: lim(gato.x + Math.cos(ang) * d, 60, ML - 60), y: lim(gato.y + Math.sin(ang) * d, 60, MA - 60), t: 0, vida: rand(3.5, 6), piscar: rand(1.5, 3) };
+  }
+  if (olhos) {
+    olhos.t += dt;
+    if (Math.hypot(olhos.x - gato.x, olhos.y - gato.y) < 380) olhos.vida = Math.min(olhos.vida, olhos.t + 0.15);
+    if (olhos.t > olhos.vida) { olhos = null; proxOlhos = rand(4, 10); }
+  }
+  if (titulo) titulo.t += dt;
+}
+
+/* ============ DESENHO ============ */
+const PX_CHAVE = ["..XXX...", ".X...X..", ".X...X..", "..XXX...", "...X....", "...XX...", "...X....", "...XX..."];
+const PX_CORACAO = [".XX.XX.", "XXXXXXX", "XXXXXXX", ".XXXXX.", "..XXX..", "...X..."];
+const PX_CADEADO = ["..XXXX..", ".X....X.", ".X....X.", "XXXXXXXX", "XXXXXXXX", "XXX..XXX", "XXX..XXX", "XXXXXXXX"];
+function pixels(mapa, x, y, P, cor, sombra) {
+  mapa.forEach((lin, r) => [...lin].forEach((ch, c) => {
+    if (ch !== "X") return;
+    if (sombra) { ctx.fillStyle = "#000"; ctx.fillRect(x + c * P + 1, y + r * P + 2, P, P); }
+    ctx.fillStyle = cor; ctx.fillRect(x + c * P, y + r * P, P, P);
+  }));
+}
+function desenharInim(e) {
+  let sx = 1, sy = 1, a = 0.92;
+  if (!e.vivo) { const t = Math.min(1, e.morte / 0.5); if (t >= 1) return; sy = 1 - t * 0.85; sx = 1 + t * 0.4; a = 0.92 * (1 - t); }
+  const S = Sf(e.y), bob = e.vivo ? Math.sin(tempo * 3 + e.f) * 8 * S : 0, h = FANT_TAM * S;
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.beginPath(); ctx.ellipse(e.x, e.y, h * 0.28, h * 0.06, 0, 0, 7); ctx.fill();
+  ctx.translate(e.x, e.y - 14 * S - bob);
+  ctx.scale(e.dir * (FANT_OLHA_PARA === "direita" ? 1 : -1) * sx, sy);
+  if (pronto(fantImg)) { const w = h * fantImg.naturalWidth / fantImg.naturalHeight; ctx.drawImage(fantImg, -w / 2, -h, w, h); }
+  else {
+    ctx.fillStyle = "#dfe9ff"; ctx.beginPath(); ctx.arc(0, -h * 0.6, h * 0.4, Math.PI, 0); ctx.lineTo(h * 0.4, -8 * S); ctx.lineTo(-h * 0.4, -8 * S); ctx.fill();
+    ctx.fillStyle = "#000"; ctx.fillRect(-16 * S, -h * 0.68, 9 * S, 16 * S); ctx.fillRect(7 * S, -h * 0.68, 9 * S, 16 * S);
+  }
+  ctx.restore();
+}
+/* chave no chão: flutua, brilha e solta faíscas */
+function desenharChave(it) {
+  const S = Sf(it.fy * MA), x = it.fx * ML, y = it.fy * MA, ouro = it.id === 1;
+  const flut = Math.sin(tempo * 3 + it.id) * 9 * S, cor = ouro ? "#ffd24a" : "#8fe3ff", rgb = ouro ? "255,210,80" : "140,230,255";
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.beginPath(); ctx.ellipse(x, y, 34 * S, 8 * S, 0, 0, 7); ctx.fill();
+  const g = ctx.createRadialGradient(x, y - 50 * S + flut, 0, x, y - 50 * S + flut, 110 * S);
+  g.addColorStop(0, `rgba(${rgb},${0.5 + 0.15 * Math.sin(tempo * 5)})`); g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = g; ctx.fillRect(x - 110 * S, y - 160 * S + flut, 220 * S, 220 * S);
+  const img = chaveImg[it.id];
+  if (pronto(img)) { const w = 110 * S; ctx.drawImage(img, x - w / 2, y - 100 * S + flut, w, w); }
+  else { const P = 8 * S; pixels(PX_CHAVE, x - 4 * P, y - 9 * P - 10 * S + flut, P, cor, true); }
+  for (let i = 0; i < 4; i++) {
+    const a = tempo * 2 + i * 1.6, r = (50 + 12 * Math.sin(tempo * 3 + i)) * S, sx = x + Math.cos(a) * r, sy = y - 50 * S + flut + Math.sin(a) * r * 0.6, k = (2 + 2 * Math.abs(Math.sin(tempo * 6 + i))) * S;
+    ctx.fillStyle = "#fff"; ctx.fillRect(sx - k, sy - k / 3, k * 2, k * 0.66); ctx.fillRect(sx - k / 3, sy - k, k * 0.66, k * 2);
+  }
+}
+function desenharItens(antes, py) {
+  (ITENS[cena] || []).forEach(it => { if (!chaves[it.id - 1] && ((it.fy * MA <= py) === antes)) desenharChave(it); });
+}
+/* cadeado da porta de saída do salão: vermelho trancado, verde com as 2 chaves */
+function desenharCadeado() {
+  const ok = nChaves() === 2, P = 9, x = SAIDA.x - 4 * P, y = 1505 + Math.sin(tempo * 2) * 3;
+  ctx.save(); ctx.globalAlpha = 0.9;
+  const g = ctx.createRadialGradient(SAIDA.x, y + 4 * P, 0, SAIDA.x, y + 4 * P, 150);
+  g.addColorStop(0, ok ? "rgba(80,255,130,.3)" : "rgba(255,50,50,.28)"); g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g; ctx.fillRect(SAIDA.x - 150, y - 100, 300, 300);
+  pixels(PX_CADEADO, x, y - (ok ? 6 : 0), P, ok ? "#46d977" : "#d0222c", true);
+  ctx.restore();
+}
+function desenharEspinhos(antes, py) {
+  if (!arm || pronto(salaImg[3])) return;
+  const yF = SALA_Y_FUNDO * MA, yN = SALA_Y_PERTO * MA, et = arm.t - 1.4;
+  for (let i = 0; i < 15; i++) {
+    const y = yF + (yN - yF) * Math.pow(i / 14, 1.35);
+    if ((y <= py) !== antes) continue;
+    const S = Sf(y), [xl, xr] = bordas(y), n = Math.max(2, Math.floor((xr - xl) / (115 * S))), w = (xr - xl) / n;
+    let hf = et < 0 ? (arm.t < 0.4 ? 0 : 0.1 + 0.05 * Math.sin(tempo * 25 + i)) : lim((et - (y - yF) / (yN - yF) * 1.2) / 0.22, 0, 1);
+    if (hf <= 0.001) continue;
+    const bw = 34 * S, h = 130 * S * hf;
+    for (let k = 0; k < n; k++) {
+      const x = xl + (k + 0.5 + (i % 2 ? 0.5 : 0)) * w; if (x > xr) continue;
+      ctx.fillStyle = "#6d7682"; ctx.beginPath(); ctx.moveTo(x - bw, y); ctx.lineTo(x, y - h); ctx.lineTo(x, y); ctx.fill();
+      ctx.fillStyle = "#b7c1cc"; ctx.beginPath(); ctx.moveTo(x + bw, y); ctx.lineTo(x, y - h); ctx.lineTo(x, y); ctx.fill();
+    }
+  }
+}
+function desenharHUD() {
+  const P = Math.max(3, Math.round(Math.min(W, H) / 150));
+  for (let i = 0; i < 3; i++) pixels(PX_CORACAO, 18 + i * (8 * P + 6), 18, P, i < vidas ? "#e8203c" : "#2a1a22", true);
+  const Q = Math.max(3, Math.round(P * 0.85)), ky = 18 + 6 * P + 14;
+  [["#ffd24a", 0], ["#8fe3ff", 1]].forEach(([cor, i]) => pixels(PX_CHAVE, 18 + i * (9 * Q + 8), ky, Q, chaves[i] ? cor : "#2a2630", true));
+}
+
+function desenhar() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#050607"; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  const sh = shake * 14; ctx.translate(rand(-sh, sh), rand(-sh, sh));
+
+  // ---- mundo ----
+  ctx.save();
+  ctx.scale(escala, escala);
+  ctx.translate(-cam.x, -cam.y);
+
+  if (cena === 1) {
+    const sg = ctx.createLinearGradient(0, 0, 0, MA * 0.7); sg.addColorStop(0, "#070914"); sg.addColorStop(1, "#1d1b4a");
+    ctx.fillStyle = sg; ctx.fillRect(0, 0, ML, MA);
+    if (pronto(cenario)) ctx.drawImage(cenario, 0, 0, ML, MA);
+  } else if (cena === 2) {
+    if (pronto(cenario2)) ctx.drawImage(cenario2, 0, 0, ML, MA); else { ctx.fillStyle = "#1a1226"; ctx.fillRect(0, 0, ML, MA); }
+  } else ctx.drawImage(pronto(salaImg[cena]) ? salaImg[cena] : fundos[cena], 0, 0, ML, MA);
+
+  ctx.globalAlpha = cena === 1 ? 0.10 : 0.05;
+  nevoa.forEach(n => ctx.drawImage(nevoaSpr, n.x - n.r, n.y - n.r, n.r * 2, n.r * 2));
+  ctx.globalAlpha = 1;
+  if (cena === 2) desenharCadeado();
+
+  const py = gato.y + PES, inims = INIM[cena], S0 = Sf(py);
+  inims.filter(e => e.y <= py).forEach(desenharInim);
+  desenharItens(true, py);
+  if (cena === 3) desenharEspinhos(true, py);
+
+  const noAr = Math.min(1, gato.z / 110), pulo = Math.abs(Math.sin(gato.andar)) * gato.mov * (1 - noAr);
+  ctx.fillStyle = `rgba(0,0,0,${0.45 * (1 - noAr * 0.6) * alfaGato})`;
+  ctx.beginPath();
+  ctx.ellipse(gato.x, py - 4 * S0, GATO_TAM * S0 * (0.34 - pulo * 0.05) * (1 - noAr * 0.35), GATO_TAM * S0 * 0.07 * (1 - noAr * 0.35), 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  const sq = gato.z > 0 ? 1 + lim(gato.vz / 3500, -0.12, 0.16) : 1 + Math.sin(gato.andar * 2) * 0.03 * gato.mov;
+  const respira = 1 + Math.sin(tempo * 2) * 0.012 * (1 - gato.mov);
+  const flip = (GATO_OLHA_PARA === "direita" ? 1 : -1) * gato.dir;
+  ctx.save();
+  ctx.globalAlpha = alfaGato * (inv > 0 && !emerge && Math.floor(tempo * 14) % 2 ? 0.35 : 1);
+  ctx.translate(gato.x, py - gato.z * S0);
+  ctx.scale(S0, S0);
+  ctx.rotate(gato.z > 0 ? lim(gato.vx / VEL_MAX, -1, 1) * 0.12 : Math.sin(gato.andar) * 0.045 * gato.mov);
+  ctx.scale(flip * (2 - sq) * respira, sq * respira);
+  const oy = -GATO_TAM * 0.9 - pulo * 8;
+  if (pronto(gatoImg)) ctx.drawImage(gatoImg, -GATO_TAM / 2, oy, GATO_TAM, GATO_TAM);
+  else { ctx.fillStyle = "#f4a259"; ctx.fillRect(-GATO_TAM / 2, oy, GATO_TAM, GATO_TAM); }
+  ctx.restore();
+
+  inims.filter(e => e.y > py).forEach(desenharInim);
+  desenharItens(false, py);
+  if (cena === 3) desenharEspinhos(false, py);
+
+  poeira.forEach(p => {
+    ctx.globalAlpha = 0.25 + 0.2 * Math.sin(tempo * 1.5 + p.f);
+    ctx.fillStyle = "#cfd8d2"; ctx.fillRect(p.x, p.y, p.r * 1.6, p.r * 1.6);
+  });
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // ---- coordenadas de tela ----
+  const sx = (gato.x - cam.x) * escala;
+  const sy = (py - GATO_TAM * 0.5 * S0 - gato.z * 0.5 - cam.y) * escala;
+  const raio = Math.max(W, H) * (cena === 1 ? 0.42 : 0.40) * lanterna * (1 + relamp * 1.3) * (fimTipo === "vitoria" ? 2.6 : 1);
+
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = TINTA[cena]; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = "source-over";
+
+  const esc = ctx.createRadialGradient(sx, sy, raio * 0.08, sx, sy, raio);
+  esc.addColorStop(0, "rgba(0,0,6,0)"); esc.addColorStop(0.35, "rgba(0,0,6,0.38)");
+  esc.addColorStop(0.7, "rgba(0,0,4,0.82)"); esc.addColorStop(1, "rgba(0,0,3,0.97)");
+  ctx.fillStyle = esc; ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = "lighter";
+  (BRILHOS[cena] || []).forEach(([fx, fy, cor]) => {
+    const x = (fx * ML - cam.x) * escala, y = (fy * MA - cam.y) * escala, r = (cena === 2 ? 280 : 260) * escala;
+    const k = 0.24 + Math.sin(tempo * 13 + fx * 50) * 0.05 + (Math.random() - .5) * 0.04;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${cor},${k})`); g.addColorStop(1, `rgba(${cor},0)`);
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  });
+  if (emerge) {
+    const u = emerge.t / emerge.dur, x = (SALA_PORTA_X * ML - cam.x) * escala, y = (0.55 * MA - cam.y) * escala, r = 320 * escala;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${COR_PORTA[cena]},${0.6 * (1 - u) + 0.1})`); g.addColorStop(1, `rgba(${COR_PORTA[cena]},0)`);
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  ctx.globalCompositeOperation = "source-over";
+
+  if (olhos) {
+    const ex = (olhos.x - cam.x) * escala, ey = (olhos.y - cam.y) * escala;
+    const fd = Math.min(1, olhos.t / 1.2, (olhos.vida - olhos.t) / 0.4);
+    const aberto = ((olhos.t % olhos.piscar) < olhos.piscar - 0.18) ? 1 : 0.05;
+    const s = escala * 22, sep = escala * 34;
+    ctx.save(); ctx.globalAlpha = Math.max(0, fd) * 0.9;
+    [-1, 1].forEach(l => {
+      const x = ex + l * sep / 2, g = ctx.createRadialGradient(x, ey, 0, x, ey, s * 2.2);
+      g.addColorStop(0, "rgba(255,70,40,0.55)"); g.addColorStop(1, "rgba(255,40,20,0)");
+      ctx.fillStyle = g; ctx.fillRect(x - s * 2.2, ey - s * 2.2, s * 4.4, s * 4.4);
+      ctx.fillStyle = "#ff5a3a";
+      ctx.beginPath(); ctx.ellipse(x, ey, s * 0.5, s * 0.22 * aberto, l * -0.25, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  if (relamp > 0) { ctx.fillStyle = `rgba(190,210,255,${relamp * 0.5})`; ctx.fillRect(0, 0, W, H); }
+  if (arm && arm.t < 1.4) { ctx.fillStyle = `rgba(200,0,0,${(0.06 + 0.1 * Math.sin(arm.t * 14)) * Math.min(1, arm.t)})`; ctx.fillRect(0, 0, W, H); }
+
+  const bat = Math.pow(Math.max(0, Math.sin(fase)), 8), pe = (3 - vidas) * 0.15;
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * (0.35 - pe * 0.3), W / 2, H / 2, Math.max(W, H) * 0.78);
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, `rgba(${Math.round(30 + bat * 50 + pe * 150)},0,0,${Math.min(0.95, 0.55 + bat * 0.12 + pe * 0.4) * (fimTipo === "vitoria" ? 0.4 : 1)})`);
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  ctx.globalAlpha = 0.05;
+  for (let i = 0; i < 90; i++) { ctx.fillStyle = Math.random() < .5 ? "#fff" : "#000"; ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
+  ctx.globalAlpha = 1;
+
+  if (flashRed > 0) { ctx.fillStyle = `rgba(190,0,0,${flashRed * 0.55})`; ctx.fillRect(0, 0, W, H); }
+
+  if (titulo && titulo.t < 4.5) {
+    ctx.save(); ctx.globalAlpha = Math.sin(Math.PI * Math.min(1, titulo.t / 4.5)); ctx.textAlign = "center";
+    ctx.font = `${Math.round(Math.min(W / 14, 54))}px Georgia, serif`;
+    ctx.shadowColor = "#a00"; ctx.shadowBlur = 18; ctx.fillStyle = "#d8c8c0";
+    ctx.fillText(titulo.txt, W / 2 + rand(-1.5, 1.5), H * 0.2 + rand(-1, 1));
+    ctx.restore();
+  }
+  ctx.restore();
+
+  desenharHUD();
+
+  if (fim) {
+    const v = fimTipo === "vitoria";
+    if (v && pronto(finalImg)) { const k = Math.max(W / finalImg.naturalWidth, H / finalImg.naturalHeight), w = finalImg.naturalWidth * k, h = finalImg.naturalHeight * k; ctx.drawImage(finalImg, (W - w) / 2, (H - h) / 2, w, h); }
+    ctx.fillStyle = `rgba(0,0,0,${v ? (pronto(finalImg) ? 0.25 : 0.45) : 0.72})`; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center"; ctx.shadowColor = v ? "#fa0" : "#a00"; ctx.shadowBlur = 24; ctx.fillStyle = v ? "#ffe9a0" : "#e0cfc8";
+    ctx.font = `${Math.round(Math.min(W / 10, 80))}px Georgia, serif`; ctx.fillText(fimMsg, W / 2, H * 0.46);
+    ctx.shadowBlur = 0; ctx.fillStyle = "#c4ccc8"; ctx.font = `${Math.round(Math.min(W / 34, 22))}px Georgia, serif`;
+    ctx.fillText(fimSub, W / 2, H * 0.46 + 50);
+    ctx.textAlign = "start";
+  }
+  if (flashBranco > 0) { ctx.fillStyle = `rgba(255,250,235,${flashBranco})`; ctx.fillRect(0, 0, W, H); }
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+
+/* ============ LOOP ============ */
+let ultimo = performance.now();
+function loop(agora) {
+  const dt = Math.min((agora - ultimo) / 1000, 0.05);
+  ultimo = agora;
+  atualizar(dt); desenhar();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+setTimeout(() => { document.getElementById("dica").style.opacity = 0; }, 9000);
+</script>
+<script src="boss.js"></script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Jogo do Gato</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #dica {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    color: #b9c4c0; font: 15px/1.4 Georgia, serif; letter-spacing: .04em; white-space: nowrap;
+    text-shadow: 0 0 8px #000; opacity: .85; transition: opacity 2s; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="jogo"></canvas>
+<div id="dica">W A S D andar &nbsp;·&nbsp; SHIFT ou ESPAÇO pular &nbsp;·&nbsp; entre pela porta da mansão &nbsp;·&nbsp; M som</div>
+
+<script>
+/* ============ CONFIGURAÇÃO ============ */
+const MUNDO_L = 2848, MUNDO_A = 1600;
+const GATO_TAM = 210;
+const GATO_OLHA_PARA = "direita";
+const ZOOM = 1.5;
+const ACEL = 2600, ATRITO = 9, VEL_MAX = 420;
+const PULO_V = 640, GRAV = 1900;          // força do pulo e gravidade
+const PORTA = { x: 1450, y: 1030 };       // porta da mansão no cenario.png (ajuste se precisar)
+const SAIDA_X = MUNDO_L / 2;              // saída no cenario2 (parte de baixo, centro)
+
+/* ============ SETUP ============ */
+const canvas = document.getElementById("jogo");
+const ctx = canvas.getContext("2d");
+let W, H, DPR, escala;
+function redimensionar() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  escala = Math.max(W / MUNDO_L, H / MUNDO_A) * ZOOM;
+}
+window.addEventListener("resize", redimensionar);
+redimensionar();
+
+const cenario = new Image(); cenario.src = "cenario.png";
+const cenario2 = new Image(); cenario2.src = "cenario2.png";   // opcional: se não existir, desenho um interior sombrio
+const gatoImg = new Image(); gatoImg.src = "cat.png";
+const pronto = (i) => i.complete && i.naturalWidth > 0;
+const rand = (a, b) => a + Math.random() * (b - a);
+const lim = (v, a, b) => Math.max(a, Math.min(b, v));
+
+/* ============ INTERIOR PROCEDURAL (fallback do cenario2) ============ */
+const JANELAS = [450, 1000, 1850, 2400];
+const CANDELABROS = [{ x: 700, y: 900 }, { x: 2150, y: 900 }, { x: 1000, y: 1350 }, { x: 1850, y: 1350 }];
+const interiorFB = (() => {
+  const c = document.createElement("canvas"); c.width = MUNDO_L; c.height = MUNDO_A;
+  const g = c.getContext("2d");
+  let w = g.createLinearGradient(0, 0, 0, 700); w.addColorStop(0, "#1a1226"); w.addColorStop(1, "#2b1d33");
+  g.fillStyle = w; g.fillRect(0, 0, MUNDO_L, 710);
+  g.fillStyle = "rgba(0,0,0,.25)"; for (let x = 0; x < MUNDO_L; x += 90) g.fillRect(x, 0, 40, 710);
+  g.fillStyle = "#120c10"; g.fillRect(0, 660, MUNDO_L, 50);
+  const f = g.createLinearGradient(0, 710, 0, MUNDO_A); f.addColorStop(0, "#2a1a14"); f.addColorStop(1, "#0e0807");
+  g.fillStyle = f; g.fillRect(0, 710, MUNDO_L, MUNDO_A - 710);
+  g.strokeStyle = "rgba(0,0,0,.55)"; g.lineWidth = 3;
+  for (let y = 710; y < MUNDO_A; y += 60 + (y - 710) * 0.08) { g.beginPath(); g.moveTo(0, y); g.lineTo(MUNDO_L, y); g.stroke(); }
+  for (let i = -20; i < 40; i++) { g.beginPath(); g.moveTo(MUNDO_L / 2 + i * 70, 710); g.lineTo(MUNDO_L / 2 + i * 150, MUNDO_A); g.stroke(); }
+  // tapete
+  g.fillStyle = "#3a0f16"; g.fillRect(MUNDO_L / 2 - 300, 800, 600, 800);
+  g.strokeStyle = "#7a5a2a"; g.lineWidth = 8; g.strokeRect(MUNDO_L / 2 - 280, 820, 560, 780);
+  // janelas + feixes de luar
+  JANELAS.forEach(x => {
+    g.fillStyle = "rgba(150,180,255,.07)"; g.beginPath();
+    g.moveTo(x - 80, 520); g.lineTo(x + 80, 520); g.lineTo(x + 460, 1300); g.lineTo(x - 220, 1300); g.fill();
+    const j = g.createLinearGradient(0, 130, 0, 520); j.addColorStop(0, "#35508f"); j.addColorStop(1, "#8fb0e8");
+    g.fillStyle = "#0b0810"; g.fillRect(x - 100, 120, 200, 410);
+    g.fillStyle = j; g.fillRect(x - 85, 135, 170, 380);
+    g.fillStyle = "#0b0810"; g.fillRect(x - 6, 135, 12, 380); g.fillRect(x - 85, 300, 170, 12);
+  });
+  // retratos sinistros
+  [725, 1425, 2125].forEach((x, i) => {
+    const s = i === 1 ? 1.4 : 1;
+    g.fillStyle = "#4a3820"; g.fillRect(x - 70 * s, 160, 140 * s, 220 * s);
+    g.fillStyle = "#0c0a0c"; g.fillRect(x - 58 * s, 172, 116 * s, 196 * s * 1.0);
+    g.fillStyle = "#c9c2b0"; g.beginPath(); g.ellipse(x, 260, 30 * s, 40 * s, 0, 0, 7); g.fill();
+    g.fillStyle = "#000"; g.fillRect(x - 16 * s, 248, 10 * s, 14 * s); g.fillRect(x + 7 * s, 248, 10 * s, 14 * s);
+  });
+  // porta de saída
+  const p = g.createLinearGradient(0, 1500, 0, MUNDO_A); p.addColorStop(0, "rgba(90,150,170,0)"); p.addColorStop(1, "rgba(120,190,210,.55)");
+  g.fillStyle = p; g.fillRect(MUNDO_L / 2 - 170, 1500, 340, 100);
+  return c;
+})();
+
+/* ============ ESTADO ============ */
+const gato = { x: MUNDO_L / 2, y: MUNDO_A * 0.6, vx: 0, vy: 0, z: 0, vz: 0, dir: 1, andar: 0, mov: 0 };
+const cam = { x: 0, y: 0 };
+let cena = 1, transicao = null, fade = 0, titulo = null;
+function alvoCam() {
+  const visL = W / escala, visA = H / escala;
+  return [lim(gato.x - visL / 2, 0, MUNDO_L - visL), lim(gato.y - visA / 2, 0, MUNDO_A - visA)];
+}
+function snapCam() { [cam.x, cam.y] = alvoCam(); }
+snapCam();
+
+const teclas = {};
+addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (k.length === 1 && "wasd".includes(k)) { teclas[k] = true; e.preventDefault(); iniciarSom(); }
+  if ((k === "shift" || e.code === "Space") && !e.repeat) { e.preventDefault(); iniciarSom(); pular(); }
+  if (k === "m") alternarSom();
+});
+addEventListener("keyup", (e) => { teclas[e.key.toLowerCase()] = false; });
+addEventListener("blur", () => { for (const k in teclas) teclas[k] = false; });
+
+function pular() {
+  if (gato.z > 0 || transicao) return;
+  gato.vz = PULO_V; sfx("pulo");
+}
+
+/* ============ ATMOSFERA ============ */
+const nevoa = Array.from({ length: 9 }, () => ({ x: rand(0, MUNDO_L), y: rand(0, MUNDO_A), r: rand(350, 650), vx: rand(8, 24) * (Math.random() < .5 ? -1 : 1) }));
+const poeira = Array.from({ length: 110 }, () => ({ x: rand(0, MUNDO_L), y: rand(0, MUNDO_A), r: rand(1, 2.6), vx: rand(-10, 10), vy: rand(-14, -3), f: rand(0, 6) }));
+let olhos = null, proxOlhos = rand(4, 8);
+let tempo = 0, lanterna = 1, lanternaAlvo = 1, proxFalha = rand(5, 12), falha = 0;
+let relamp = 0, relampB = false, proxRaio = rand(6, 12);
+let shake = 0, flashRed = 0, cdSusto = 0, perigo = 0, fase = 0;
+const novoFant = () => ({ x: rand(300, MUNDO_L - 300), y: rand(750, 1250), f: rand(0, 6), sp: rand(70, 110) });
+const fantasmas = Array.from({ length: 4 }, novoFant);
+
+/* ============ SOM ============ */
+let audio = null, mudo = false;
+function iniciarSom() {
+  if (audio) return;
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const mestre = ac.createGain(); mestre.gain.value = 0.0; mestre.connect(ac.destination);
+    mestre.gain.linearRampToValueAtTime(0.16, ac.currentTime + 4);
+    [[55, "sine"], [58.3, "sine"], [110.7, "triangle"]].forEach(([f, t], i) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = t; o.frequency.value = f; g.gain.value = i === 2 ? 0.25 : 0.7;
+      const lfo = ac.createOscillator(), lg = ac.createGain();
+      lfo.frequency.value = 0.07 + i * 0.05; lg.gain.value = g.gain.value * 0.5;
+      lfo.connect(lg).connect(g.gain);
+      o.connect(g).connect(mestre); o.start(); lfo.start();
+    });
+    audio = { ac, mestre };
+  } catch (e) {}
+}
+function alternarSom() {
+  if (!audio) return;
+  mudo = !mudo;
+  audio.mestre.gain.setTargetAtTime(mudo ? 0 : 0.16, audio.ac.currentTime, 0.2);
+}
+function tom(tipo, f0, f1, dur, vol) {
+  const ac = audio.ac, t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = tipo; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+function ruido(dur, vol, fc) {
+  const ac = audio.ac, n = ac.sampleRate * dur, b = ac.createBuffer(1, n, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = ac.createBufferSource(), fl = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = b; fl.type = "lowpass"; fl.frequency.value = fc; g.gain.value = vol;
+  s.connect(fl).connect(g).connect(ac.destination); s.start();
+}
+function sfx(t) {
+  if (!audio || mudo) return;
+  if (t === "pulo") tom("sine", 300, 640, 0.18, 0.08);
+  else if (t === "pouso") ruido(0.12, 0.12, 400);
+  else if (t === "porta") { tom("sawtooth", 80, 190, 1.3, 0.05); ruido(0.5, 0.08, 900); }
+  else if (t === "trovao") ruido(2.8, 0.4, 170);
+  else if (t === "susto") { tom("sawtooth", 1000, 180, 0.9, 0.12); tom("square", 1400, 300, 0.7, 0.05); ruido(0.5, 0.18, 2500); }
+}
+
+/* ============ TRANSIÇÃO DE CENA ============ */
+function trocar(para) {
+  if (transicao) return;
+  transicao = { para, t: 0, feito: false }; sfx("porta");
+}
+function aplicarTroca(para) {
+  cena = para; gato.vx = gato.vy = 0; olhos = null;
+  if (para === 2) {
+    gato.x = SAIDA_X; gato.y = MUNDO_A * 0.84;
+    fantasmas.forEach((f, i) => { Object.assign(f, novoFant()); });
+    titulo = { txt: "DENTRO DA MANSÃO", t: 0 };
+  } else {
+    gato.x = PORTA.x; gato.y = PORTA.y + 130; titulo = null;
+  }
+  snapCam();
+}
+function susto(f, dx, dy, d) {
+  sfx("susto"); shake = 1; flashRed = 1; cdSusto = 2.2;
+  gato.vx += (-dx / d) * 900; gato.vy += (-dy / d) * 900;
+  f.x = lim(gato.x + (Math.random() < .5 ? -1 : 1) * rand(700, 1000), 150, MUNDO_L - 150); f.y = rand(750, 1300);
+}
+
+/* ============ ATUALIZAÇÃO ============ */
+function atualizar(dt) {
+  tempo += dt;
+  let ix = (teclas.d ? 1 : 0) - (teclas.a ? 1 : 0);
+  let iy = (teclas.s ? 1 : 0) - (teclas.w ? 1 : 0);
+  if (transicao) ix = iy = 0;
+  if (ix && iy) { ix *= Math.SQRT1_2; iy *= Math.SQRT1_2; }
+
+  gato.vx += ix * ACEL * dt; gato.vy += iy * ACEL * dt;
+  const f = Math.exp(-ATRITO * dt);
+  gato.vx *= f; gato.vy *= f;
+  const v = Math.hypot(gato.vx, gato.vy);
+  if (v > VEL_MAX) { gato.vx *= VEL_MAX / v; gato.vy *= VEL_MAX / v; }
+
+  gato.x += gato.vx * dt; gato.y += gato.vy * dt;
+  const m = GATO_TAM / 2;
+  gato.x = lim(gato.x, m, MUNDO_L - m);
+  gato.y = lim(gato.y, cena === 2 ? 760 : m, MUNDO_A - m * 0.4);
+
+  // pulo
+  if (gato.z > 0 || gato.vz > 0) {
+    gato.vz -= GRAV * dt; gato.z += gato.vz * dt;
+    if (gato.z <= 0) { if (gato.vz < -300) sfx("pouso"); gato.z = 0; gato.vz = 0; }
+  }
+
+  if (Math.abs(gato.vx) > 20) gato.dir = Math.sign(gato.vx);
+  gato.mov = Math.min(1, v / VEL_MAX);
+  gato.andar += dt * (4 + gato.mov * 10) * (gato.mov > 0.03 ? 1 : 0.3);
+
+  // portas
+  if (!transicao) {
+    if (cena === 1 && Math.hypot(gato.x - PORTA.x, (gato.y - PORTA.y) * 1.3) < 85) trocar(2);
+    if (cena === 2 && gato.y > MUNDO_A - 90 && Math.abs(gato.x - SAIDA_X) < 170) trocar(1);
+  } else {
+    transicao.t += dt;
+    const t = transicao.t;
+    fade = t < 0.8 ? t / 0.8 : Math.max(0, 1 - (t - 0.8) / 0.8);
+    if (t >= 0.8 && !transicao.feito) { transicao.feito = true; aplicarTroca(transicao.para); }
+    if (t >= 1.6) { transicao = null; fade = 0; }
+  }
+
+  const [ax, ay] = alvoCam(), c = 1 - Math.exp(-4 * dt);
+  cam.x += (ax - cam.x) * c; cam.y += (ay - cam.y) * c;
+
+  // lanterna
+  proxFalha -= dt;
+  if (proxFalha <= 0) { falha = rand(0.25, 0.7); proxFalha = rand(5, 12); }
+  if (falha > 0) { falha -= dt; lanternaAlvo = Math.random() < .5 ? 0.25 : 0.9; }
+  else lanternaAlvo = 1 + Math.sin(tempo * 9) * 0.015 + Math.sin(tempo * 23) * 0.01;
+  lanterna += (lanternaAlvo - lanterna) * (1 - Math.exp(-30 * dt));
+
+  // relâmpagos (duplos) + trovão atrasado
+  proxRaio -= dt;
+  if (proxRaio <= 0 && !transicao) {
+    relamp = 1; relampB = true; proxRaio = rand(8, 18);
+    setTimeout(() => sfx("trovao"), rand(400, 1400));
+  }
+  if (relamp > 0) { relamp -= dt * 3; if (relamp < 0.45 && relampB) { relamp = 0.85; relampB = false; } }
+  relamp = Math.max(0, relamp);
+
+  shake = Math.max(0, shake - dt * 1.4); flashRed = Math.max(0, flashRed - dt * 1.8); cdSusto -= dt;
+
+  nevoa.forEach(n => { n.x += n.vx * dt; if (n.x > MUNDO_L + n.r) n.x = -n.r; if (n.x < -n.r) n.x = MUNDO_L + n.r; });
+  poeira.forEach(p => {
+    p.x += (p.vx + Math.sin(tempo + p.f) * 8) * dt; p.y += p.vy * dt;
+    if (p.y < 0) p.y = MUNDO_A; if (p.x < 0) p.x = MUNDO_L; if (p.x > MUNDO_L) p.x = 0;
+  });
+
+  // fantasmas (só dentro da mansão): perseguem devagar; pular por cima evita o susto
+  let minD = 9999;
+  if (cena === 2) fantasmas.forEach(g => {
+    const dx = gato.x - g.x, dy = gato.y - g.y, d = Math.hypot(dx, dy) || 1;
+    minD = Math.min(minD, d);
+    if (d < 700) { g.x += dx / d * g.sp * dt; g.y += dy / d * g.sp * dt; }
+    else { g.x += Math.sin(tempo * .5 + g.f) * 40 * dt; g.y += Math.cos(tempo * .4 + g.f) * 30 * dt; }
+    g.x = lim(g.x, 100, MUNDO_L - 100); g.y = lim(g.y, 650, MUNDO_A - 60);
+    if (d < 125 && gato.z < 45 && cdSusto <= 0 && !transicao) susto(g, dx, dy, d);
+  });
+  perigo += (Math.max(0, 1 - minD / 500) - perigo) * (1 - Math.exp(-3 * dt));
+  fase += dt * (2.2 + perigo * 3.5);
+
+  // olhos (só fora)
+  proxOlhos -= dt;
+  if (cena === 1 && !olhos && proxOlhos <= 0) {
+    const ang = rand(0, Math.PI * 2), d = rand(520, 900);
+    olhos = { x: lim(gato.x + Math.cos(ang) * d, 60, MUNDO_L - 60), y: lim(gato.y + Math.sin(ang) * d, 60, MUNDO_A - 60), t: 0, vida: rand(3.5, 6), piscar: rand(1.5, 3) };
+  }
+  if (olhos) {
+    olhos.t += dt;
+    if (Math.hypot(olhos.x - gato.x, olhos.y - gato.y) < 380) olhos.vida = Math.min(olhos.vida, olhos.t + 0.15);
+    if (olhos.t > olhos.vida) { olhos = null; proxOlhos = rand(4, 10); }
+  }
+  if (titulo) titulo.t += dt;
+}
+
+/* ============ DESENHO ============ */
+function desenharFant(g) {
+  const bob = Math.sin(tempo * 2 + g.f) * 10, a = 0.5 + 0.2 * Math.sin(tempo * 3 + g.f);
+  ctx.save(); ctx.translate(g.x, g.y + bob); ctx.globalAlpha = a;
+  const gr = ctx.createLinearGradient(0, -90, 0, 90); gr.addColorStop(0, "#e8f4ff"); gr.addColorStop(1, "rgba(160,200,255,0)");
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(0, -40, 50, Math.PI, 0);
+  for (let i = 0; i <= 4; i++) ctx.lineTo(50 - i * 25, 70 + (i % 2 ? 22 : 0) + Math.sin(tempo * 5 + i) * 8);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#000";
+  [-18, 18].forEach(x => { ctx.beginPath(); ctx.ellipse(x, -48, 9, 14, 0, 0, 7); ctx.fill(); });
+  ctx.beginPath(); ctx.ellipse(0, -12, 10, 8 + Math.abs(Math.sin(tempo * 3 + g.f)) * 14, 0, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function desenhar() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#050607"; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  const sh = shake * 14; ctx.translate(rand(-sh, sh), rand(-sh, sh));
+
+  // ---- mundo ----
+  ctx.save();
+  ctx.scale(escala, escala);
+  ctx.translate(-cam.x, -cam.y);
+
+  const usaFB = cena === 2 && !pronto(cenario2);
+  if (cena === 1) { if (pronto(cenario)) ctx.drawImage(cenario, 0, 0, MUNDO_L, MUNDO_A); else { ctx.fillStyle = "#26352c"; ctx.fillRect(0, 0, MUNDO_L, MUNDO_A); } }
+  else ctx.drawImage(usaFB ? interiorFB : cenario2, 0, 0, MUNDO_L, MUNDO_A);
+
+  const na = cena === 1 ? 0.10 : 0.05;
+  nevoa.forEach(n => {
+    const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r);
+    g.addColorStop(0, `rgba(170,190,185,${na})`); g.addColorStop(1, "rgba(170,190,185,0)");
+    ctx.fillStyle = g; ctx.fillRect(n.x - n.r, n.y - n.r, n.r * 2, n.r * 2);
+  });
+
+  if (usaFB) CANDELABROS.forEach(c => {
+    ctx.fillStyle = "#3b2a22"; ctx.fillRect(c.x - 6, c.y - 10, 12, 70);
+    ctx.fillStyle = "#d8cdb0"; ctx.fillRect(c.x - 8, c.y - 40, 16, 34);
+    const fl = 1 + Math.sin(tempo * 14 + c.x) * .15 + (Math.random() - .5) * .1;
+    ctx.fillStyle = "#ffb347"; ctx.beginPath(); ctx.ellipse(c.x, c.y - 52, 6 * fl, 13 * fl, 0, 0, 7); ctx.fill();
+  });
+
+  // sombra (encolhe quando o gato pula)
+  const noAr = Math.min(1, gato.z / 110);
+  const pulo = Math.abs(Math.sin(gato.andar)) * gato.mov * (1 - noAr);
+  ctx.fillStyle = `rgba(0,0,0,${0.45 * (1 - noAr * 0.6)})`;
+  ctx.beginPath();
+  ctx.ellipse(gato.x, gato.y + GATO_TAM * 0.42, GATO_TAM * (0.34 - pulo * 0.05) * (1 - noAr * 0.35), GATO_TAM * 0.07 * (1 - noAr * 0.35), 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // gato: estica subindo, achata caindo
+  const sq = gato.z > 0 ? 1 + lim(gato.vz / 3500, -0.12, 0.16) : 1 + Math.sin(gato.andar * 2) * 0.03 * gato.mov;
+  const respira = 1 + Math.sin(tempo * 2) * 0.012 * (1 - gato.mov);
+  const flip = (GATO_OLHA_PARA === "direita" ? 1 : -1) * gato.dir;
+  ctx.save();
+  ctx.translate(gato.x, gato.y + GATO_TAM * 0.45 - gato.z);
+  ctx.rotate(gato.z > 0 ? lim(gato.vx / VEL_MAX, -1, 1) * 0.12 : Math.sin(gato.andar) * 0.045 * gato.mov);
+  ctx.scale(flip * (2 - sq) * respira, sq * respira);
+  const oy = -GATO_TAM * 0.9 - pulo * 8;
+  if (pronto(gatoImg)) ctx.drawImage(gatoImg, -GATO_TAM / 2, oy, GATO_TAM, GATO_TAM);
+  else { ctx.fillStyle = "#f4a259"; ctx.fillRect(-GATO_TAM / 2, oy, GATO_TAM, GATO_TAM); }
+  ctx.restore();
+
+  if (cena === 2) fantasmas.forEach(desenharFant);
+
+  poeira.forEach(p => {
+    ctx.globalAlpha = 0.25 + 0.2 * Math.sin(tempo * 1.5 + p.f);
+    ctx.fillStyle = "#cfd8d2";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // ---- coordenadas de tela ----
+  const sx = (gato.x - cam.x) * escala;
+  const sy = (gato.y - GATO_TAM * 0.4 - gato.z * 0.5 - cam.y) * escala;
+  const raio = Math.max(W, H) * (cena === 1 ? 0.42 : 0.34) * lanterna * (1 + relamp * 1.3);
+
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = cena === 1 ? "#7f9a96" : "#9a8a9c"; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = "source-over";
+
+  const esc = ctx.createRadialGradient(sx, sy, raio * 0.08, sx, sy, raio);
+  esc.addColorStop(0, "rgba(0,0,6,0)");
+  esc.addColorStop(0.35, "rgba(0,0,6,0.38)");
+  esc.addColorStop(0.7, "rgba(0,0,4,0.82)");
+  esc.addColorStop(1, "rgba(0,0,3,0.97)");
+  ctx.fillStyle = esc; ctx.fillRect(0, 0, W, H);
+
+  // brilho quente das velas (por cima da escuridão)
+  if (usaFB) {
+    ctx.globalCompositeOperation = "lighter";
+    CANDELABROS.forEach(c => {
+      const x = (c.x - cam.x) * escala, y = (c.y - 50 - cam.y) * escala, r = 300 * escala;
+      const k = 0.26 + Math.sin(tempo * 13 + c.x) * 0.05 + (Math.random() - .5) * 0.04;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(255,150,50,${k})`); g.addColorStop(1, "rgba(255,120,30,0)");
+      ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    });
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // olhos na escuridão
+  if (olhos) {
+    const ex = (olhos.x - cam.x) * escala, ey = (olhos.y - cam.y) * escala;
+    const fade2 = Math.min(1, olhos.t / 1.2, (olhos.vida - olhos.t) / 0.4);
+    const aberto = ((olhos.t % olhos.piscar) < olhos.piscar - 0.18) ? 1 : 0.05;
+    const s = escala * 22, sep = escala * 34;
+    ctx.save(); ctx.globalAlpha = Math.max(0, fade2) * 0.9;
+    [-1, 1].forEach(l => {
+      const x = ex + l * sep / 2;
+      const g = ctx.createRadialGradient(x, ey, 0, x, ey, s * 2.2);
+      g.addColorStop(0, "rgba(255,70,40,0.55)"); g.addColorStop(1, "rgba(255,40,20,0)");
+      ctx.fillStyle = g; ctx.fillRect(x - s * 2.2, ey - s * 2.2, s * 4.4, s * 4.4);
+      ctx.fillStyle = "#ff5a3a";
+      ctx.beginPath(); ctx.ellipse(x, ey, s * 0.5, s * 0.22 * aberto, l * -0.25, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  // relâmpago
+  if (relamp > 0) { ctx.fillStyle = `rgba(190,210,255,${relamp * 0.5})`; ctx.fillRect(0, 0, W, H); }
+
+  // vinheta de batimento (acelera e fica vermelha com fantasmas por perto)
+  const bat = Math.pow(Math.max(0, Math.sin(fase)), 8);
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * (0.35 - perigo * 0.15), W / 2, H / 2, Math.max(W, H) * 0.78);
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, `rgba(${Math.round(30 + bat * 50 + perigo * 60)},0,0,${Math.min(0.95, 0.55 + bat * 0.12 + perigo * 0.25)})`);
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  // granulado
+  ctx.globalAlpha = 0.05 + perigo * 0.05;
+  for (let i = 0; i < 90; i++) {
+    ctx.fillStyle = Math.random() < .5 ? "#fff" : "#000";
+    ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  if (flashRed > 0) { ctx.fillStyle = `rgba(190,0,0,${flashRed * 0.55})`; ctx.fillRect(0, 0, W, H); }
+
+  // título da cena
+  if (titulo && titulo.t < 4.5) {
+    const a = Math.sin(Math.PI * Math.min(1, titulo.t / 4.5));
+    ctx.save(); ctx.globalAlpha = a; ctx.textAlign = "center";
+    ctx.font = `${Math.round(Math.min(W / 14, 54))}px Georgia, serif`;
+    ctx.shadowColor = "#a00"; ctx.shadowBlur = 18; ctx.fillStyle = "#d8c8c0";
+    ctx.fillText(titulo.txt, W / 2 + rand(-1.5, 1.5), H * 0.2 + rand(-1, 1));
+    ctx.restore();
+  }
+  ctx.restore();
+
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+
+/* ============ LOOP ============ */
+let ultimo = performance.now();
+function loop(agora) {
+  const dt = Math.min((agora - ultimo) / 1000, 0.05);
+  ultimo = agora;
+  atualizar(dt); desenhar();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+setTimeout(() => { document.getElementById("dica").style.opacity = 0; }, 9000);
+</script>
+</body>
+</html>
